@@ -1,0 +1,225 @@
+Parameters:
+  BucketName:
+    Type: String
+    Default: termassignment
+  SecretKeyName:
+    Type: String
+    Default: term-assignment-secrets
+  SnsTopicName:
+    Type: String
+    Default: TermAssignmentSNS
+  DBName:
+    Type: String
+    Default: term_assignment
+  AwsAccessKey:
+    Type: String
+    Default: YOUR_AWS_ACCESS_KEY
+  AwsSecretAccessKey:
+    Type: String
+    Default: YOUR_AWS_SECRET_ACCESS_KEY
+  AwsSessionToken:
+    Type: String
+    Default: YOUR_AWS_SESSION_TOKEN
+Resources:
+
+  #S3 bucket
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: termassignment
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+  #S3 OAI
+  S3OriginAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: "OriginAccessIdentity for accessing S3 bucket"
+
+  #S3 bucket policy to acess cloudfront
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "AllowCloudFrontAccess"
+            Effect: Allow
+            Principal:
+              CanonicalUser: !GetAtt S3OriginAccessIdentity.S3CanonicalUserId
+            Action: "s3:GetObject"
+            Resource: !Join
+              - ""
+              - - "arn:aws:s3:::"
+                - !Ref S3Bucket
+                - "/*"
+
+  #Cloud front distribution created
+  S3CloudFront:
+    Type: AWS::CloudFront::Distribution
+    DependsOn:
+      - S3Bucket
+      - S3OriginAccessIdentity
+    Properties:
+      DistributionConfig:
+        Comment: Eventhub CloudFront distribution
+        Origins:
+          - DomainName: !GetAtt S3Bucket.DomainName
+            Id: myS3Origin
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub "origin-access-identity/cloudfront/${S3OriginAccessIdentity}"
+        Enabled: true
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+            - PUT
+            - POST
+            - PATCH
+            - DELETE
+          ViewerProtocolPolicy: redirect-to-https
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+          TargetOriginId: myS3Origin
+        PriceClass: PriceClass_All
+
+  #SNS Topic created
+  MySNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: Term Assignment Email Service
+      TopicName: !Ref SnsTopicName
+  
+  #Backend EC2 security group added.
+  BackendEC2InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow traffic to port 5000
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 0.0.0.0/0
+    DependsOn:
+      - S3CloudFront
+      - S3Bucket
+      - S3BucketPolicy
+      - MySNSTopic
+
+  #Secrets Manager added
+  MySecret:
+    Type: AWS::SecretsManager::Secret
+    DependsOn:
+      - S3CloudFront
+      - MySNSTopic
+    Properties:
+      Name: !Ref SecretKeyName
+      Description: 5409 cloud term assignment
+      SecretString: !Sub |
+        {"AWS_S3_BUCKET":"${BucketName}","AWS_CLOUDFRONT_DISTRIBUTION_ID":"${S3CloudFront.Id}","AWS_SNS_TOPIC_ARN":"${MySNSTopic.TopicArn}"}
+
+  #Instance created
+  BackendEC2Instance:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - MySecret
+      - S3CloudFront
+      - S3Bucket
+      - S3BucketPolicy
+      - MySNSTopic
+    Properties:
+      InstanceType: t2.micro
+      ImageId: ami-00c39f71452c08778
+      KeyName: nikunj-assignment2-instance
+      SecurityGroupIds:
+        - !Ref BackendEC2InstanceSecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          sudo yum install -y docker
+          sudo systemctl start docker
+          sudo docker pull nikunjjj/term-assignment-backend
+          touch /term_assignment.db
+          cat <<EOF > env
+          SQLITE_DATABASE_PATH=/term_assignment.db
+          PORT=8080
+          AWS_SECRETS_MANAGER_SECRET_ID=${SecretKeyName}
+          AWS_REGION=${AWS::Region}
+          AWS_S3_ACCESS_KEY=${AwsAccessKey}
+          AWS_S3_KEY_SECRET=${AwsSecretAccessKey}
+          AWS_SESSION_TOKEN=${AwsSessionToken}
+          EOF
+          sudo docker run --env-file /env -p 8080:8080 nikunjjj/term-assignment-backend 
+
+  #Fronted application deployed by EBS
+  EBSApplication:
+    Type: AWS::ElasticBeanstalk::Application
+    Properties:
+      Description: EBS Frontend for Gallio Term Assignment
+  EBSApplicationVersion:
+    Type: AWS::ElasticBeanstalk::ApplicationVersion
+    Properties:
+      ApplicationName: !Ref EBSApplication
+      Description: EBS Frontend for Gallio Term Assignment Version 1.0
+      SourceBundle:
+        S3Bucket: termassignment5409
+        S3Key: Archive.zip
+  EBSConfigurationTemplate:
+    Type: AWS::ElasticBeanstalk::ConfigurationTemplate
+    Properties:
+      ApplicationName: !Ref EBSApplication
+      Description: EBS Frontend for Gallio Term Assignment Configuration Template
+      OptionSettings:
+        - Namespace: "aws:elasticbeanstalk:application:environment"
+          OptionName: "NODE_ENV"
+          Value: "production"
+        - Namespace: "aws:elasticbeanstalk:environment"
+          OptionName: "EnvironmentType"
+          Value: "SingleInstance"
+        - Namespace: "aws:elasticbeanstalk:environment"
+          OptionName: "ServiceRole"
+          Value: "LabRole"
+        - Namespace: "aws:autoscaling:launchconfiguration"
+          OptionName: "EC2KeyName"
+          Value: "nikunj-assignment2-instance"
+        - Namespace: "aws:autoscaling:launchconfiguration"
+          OptionName: "IamInstanceProfile"
+          Value: !Ref MyInstanceProfile
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: REACT_APP_BACKEND_URL
+          Value: !Sub | 
+            "http://${BackendEC2Instance.PublicIp}:8080"
+      SolutionStackName: 64bit Amazon Linux 2023 v6.1.2 running Node.js 20
+  EBSEnvironment:
+    Type: AWS::ElasticBeanstalk::Environment
+    DependsOn:
+      - BackendEC2Instance
+    Properties:
+      ApplicationName: !Ref EBSApplication
+      Description: EBS Backend for Gallio Term Assignment Environment
+      TemplateName: !Ref EBSConfigurationTemplate
+      VersionLabel: !Ref EBSApplicationVersion
+  MyInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - LabRole
