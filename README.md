@@ -28,6 +28,9 @@ secure and engaging platform for sharing precious moments.
 - Admin email notifications for moderated content
 - Viewer consent required for sensitive images
 
+## Architecture Diagram
+<img width="452" alt="Gallio" src="https://github.com/user-attachments/assets/6e6058b0-e985-46af-bc79-87f60d9af5f2" />
+
 ## Technical Architecture
 
 ### Frontend
